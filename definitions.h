@@ -3,6 +3,7 @@
 #include "stdlib.h"
 #include "stdio.h"
 #include "math.h"
+#include "trans.h"
 
 #ifndef DEFINITIONS_H
 #define DEFINITIONS_H
@@ -21,9 +22,22 @@
 #define MAX(A,B) A > B ? A : B
 #define MIN3(A,B,C) MIN((MIN(A,B)),C)
 #define MAX3(A,B,C) MAX((MAX(A,B)),C)
+#define MEMBERS_PER_ATTRIB
+#define X_KEY 0
+#define Y_KEY 1
 
 // Max # of vertices after clipping
 #define MAX_VERTICES 8 
+
+/****************************************************
+ * X, Y, Z, handy enums
+ ***************************************************/
+enum DIMENSION
+{
+    X = 0,
+    Y = 1,
+    Z = 2
+};
 
 /******************************************************
  * Types of primitives our pipeline will render.
@@ -46,28 +60,17 @@ struct Vertex
     double w;
 };
 
-/******************************************************
- * Calculate the area of a triangle with X and Y
- * coordinates by using two points on a graph.
- * This equation is similar to the one we discused
- * in class on finding the area of a parallelogram.
- * ****************************************************/
-double calcArea(const double & A, const double & B, const double & C, const double & D)
+// Everything needed for the view/camera transform
+struct camControls
 {
-    return (A * D - B * C);
-}
-
-/******************************************************
- * Interpolation Function
- ******************************************************/
-double interpolate(double area, double firstDet, double secondDet, double thirdDet, double A, double B, double C)
-{
-    double w1 = C * (firstDet / area);
-    double w2 = A * (secondDet / area);
-    double w3 = B * (thirdDet / area);
-
-    return w1 + w2 + w3;
-}
+	double x = 0;
+	double y = 0;
+	double z = 0;
+	double yaw = 0;
+	double roll = 0;
+	double pitch = 0;
+};
+camControls myCam;
 
 /******************************************************
  * BUFFER_2D:
@@ -79,6 +82,7 @@ template <class T>
 class Buffer2D 
 {
     protected:
+        bool baseAllocated = false;
         T** grid;
         int w;
         int h;
@@ -92,22 +96,27 @@ class Buffer2D
             {
                 grid[r] = (T*)malloc(sizeof(T) * w);
             }
+	    baseAllocated = true;
         }
 
         // Empty Constructor
-        Buffer2D()
-        {}
+	Buffer2D() {}
+		  
 
     public:
         // Free dynamic memory
         ~Buffer2D()
         {
-            // De-Allocate pointers for column references
-            for(int r = 0; r < h; r++)
-            {
-                free(grid[r]);
-            }
-            free(grid);
+	  // De-Allocate pointers for column references
+	  if(baseAllocated)	    
+	    {
+	      for(int r = 0; r < h; r++)
+		{
+		  free(grid[r]);
+		}
+	      free(grid);
+
+	    }
         }
 
         // Size-Specified constructor, no data
@@ -158,6 +167,25 @@ class Buffer2D
 };
 
 
+// Struct used for reading in RGB values from a bitmap file
+struct bmpRGB
+{
+  unsigned char b;
+  unsigned char g; 
+  unsigned char r;
+};
+
+// The portion of the Bitmap header we want to read
+struct bmpLayout
+{
+  int offset;
+  int headerSize;
+  int width;
+  int height;
+  unsigned short colorPlanes;
+  unsigned short bpp;
+};
+
 /****************************************************
  * BUFFER_IMAGE:
  * PIXEL (Uint32) specific Buffer2D class with .BMP 
@@ -167,7 +195,8 @@ class BufferImage : public Buffer2D<PIXEL>
 {
     protected:       
         SDL_Surface* img;                   // Reference to the Surface in question
-        bool ourSurfaceInstance = false;    // Do we need to de-allocate?
+        bool ourSurfaceInstance = false;    // Do we need to de-allocate the SDL2 reference?
+    	bool ourBufferData = false;         // Are we using the non-SDL2 allocated memory
 
         // Private intialization setup
         void setupInternal()
@@ -186,12 +215,80 @@ class BufferImage : public Buffer2D<PIXEL>
             }
         }
 
+    private:
+
+        // Non-SDL2 24BPP, 2^N dimensions BMP reader
+        bool readBMP(const char* fileName)
+        {
+            // Read in Header - check signature
+            FILE * fp = fopen(fileName, "rb");	    
+            char signature[2];
+            fread(signature, 1, 2, fp);
+            if(!(signature[0] == 'B' && signature[1] == 'M'))
+            {
+                printf("Invalid header for file: \"%c%c\"", signature[0], signature[1]);
+                return 1;
+            }
+
+            // Read in BMP formatting - verify type constraints
+            bmpLayout layout;
+            fseek(fp, 8, SEEK_CUR);
+            fread(&layout, sizeof(layout), 1, fp);
+            if(layout.width % 2 != 0 || layout.width <= 4)
+            {
+                printf("Size Width MUST be a power of 2 larger than 4; not %d\n", w);
+                return false;		
+            }
+            if(layout.bpp != 24)
+            {
+                printf("Bits per pixel of image must be 24; not %d\n", layout.bpp);
+                return false;
+            }
+
+            // Copy W+H information
+            w = layout.width;
+            h = layout.height;
+    
+            // Initialize internal pointers/memory
+            grid = (PIXEL**)malloc(sizeof(PIXEL*) * h);
+            for(int y = 0; y < h; y++) grid[y] = (PIXEL*)malloc(sizeof(PIXEL) * w);
+
+            // Advance to beginning of pixel data, read values in
+            bmpRGB* pixel = (bmpRGB*)malloc(sizeof(bmpRGB)*w*h);
+            fseek(fp, layout.offset, SEEK_SET);  	
+            fread(pixel, sizeof(bmpRGB), w*h, fp);
+
+            // Convert 24-bit RGB to 32-bit ARGB
+            bmpRGB* pixelPtr = pixel;
+            PIXEL* out = (PIXEL*)malloc(sizeof(PIXEL)*w*h);
+            for(int y = 0; y < h; y++)
+            {
+                for(int x = 0; x < w; x++)
+                {
+                    grid[y][x] = 0xff000000 + 
+                                 ((pixelPtr->r) << 16) +
+                                 ((pixelPtr->g) << 8) +
+                                 ((pixelPtr->b));
+                                 ++pixelPtr;
+                }
+            }
+    
+            // Release 24-Bit buffer, release file
+            free(pixel);
+            fclose(fp); 
+            return true;
+        }
+
     public:
         // Free dynamic memory
         ~BufferImage()
         {
-            // De-Allocate pointers for column references
-            free(grid);
+            // De-Allocate non-SDL2 image data
+            if(ourBufferData)
+            {
+	        free(grid);
+		return;
+            }
 
             // De-Allocate this image plane if necessary
             if(ourSurfaceInstance)
@@ -227,15 +324,27 @@ class BufferImage : public Buffer2D<PIXEL>
         // Constructor based on reading in an image - only meant for UINT32 type
         BufferImage(const char* path) 
         {
-            ourSurfaceInstance = true;
-            SDL_Surface* tmp = SDL_LoadBMP(path);      
-            SDL_PixelFormat* format = SDL_AllocFormat(SDL_PIXELFORMAT_ARGB8888);
-            img = SDL_ConvertSurface(tmp, format, 0);
-            SDL_FreeSurface(tmp);
-            SDL_FreeFormat(format);
-            SDL_LockSurface(img);
-            setupInternal();
+	  ourSurfaceInstance = false;
+	  if(!readBMP(path))
+	    {
+	      return;
+	    }	  
+	  ourBufferData = true;
         }
+};
+
+// Interpoaltes between 3 weighted points 3 different double values for barycentric
+inline double baryInterp(const double & firstWgt, const double & secndWgt, const double & thirdWgt,
+			 const double & firstVal, const double & secndVal, const double & thirdVal)
+{
+  return ((firstWgt * thirdVal) + (secndWgt * firstVal) + (thirdWgt * secndVal));
+}
+
+// Combine two datatypes in one
+union attrib
+{
+  double d;
+  void* ptr;
 };
 
 /***************************************************
@@ -247,320 +356,68 @@ class BufferImage : public Buffer2D<PIXEL>
 class Attributes
 {      
     public:
+        // Members
+    	int numMembers = 0;
+        attrib arr[16];
+
         // Obligatory empty constructor
-        Attributes() {}
+        Attributes() {numMembers = 0;}
+
+        // Interpolation Constructor
+        Attributes( const double & firstWgt, const double & secndWgt, const double & thirdWgt, 
+                    const Attributes & first, const Attributes & secnd, const Attributes & third,
+		    const double & correctZ)
+        {
+            while(numMembers < first.numMembers)
+            {
+	         arr[numMembers].d = baryInterp(firstWgt, secndWgt, thirdWgt, first.arr[numMembers].d, secnd[numMembers].d, third.arr[numMembers].d);
+			 arr[numMembers].d = arr[numMembers].d * correctZ;
+			 numMembers += 1;
+            }
+        }
 
         // Needed by clipping (linearly interpolated Attributes between two others)
-        Attributes(const Attributes & first, const Attributes & second, const double & valueBetween)
+        Attributes(const Attributes & first, const Attributes & second, const double & along)
         {
-            // Your code goes here when clipping is implemented
+				numMembers = first.numMembers;
+				for(int i = 0; i < numMembers; i++)
+				{
+					arr[i].d = (first[i].d) + ((second[i].d - first[i].d) * along);
+				}
         }
 
-        /*Vertex Attributes*/
-        //Color
-        PIXEL color;
-        double r;
-        double g;
-        double b;
-        //Texture Coordinates
-        double u;
-        double v;
-        //Image Reference
-        void* ptrImage;
-        //Other Attributes
-        double other[16];
+        // Const Return operator
+        const attrib & operator[](const int & i) const
+        {
+            return arr[i];
+        }
+
+        // Return operator
+        attrib & operator[](const int & i) 
+        {
+            return arr[i];
+        }
+
+        // Insert Double Into Container
+        void insertDbl(const double & d)
+        {
+            arr[numMembers].d = d;
+            numMembers += 1;
+        }
+    
+        // Insert Pointer Into Container
+        void insertPtr(void * ptr)
+        {
+            arr[numMembers].ptr = ptr;
+            numMembers += 1;
+        }
 };	
 
-/******************************************************
- * MATRIX
- ******************************************************/
-class Matrix
-{
-    public:
-
-        //Setup the matrix and a single vertex
-        Matrix() 
-        {
-            //Matrix of 4x4
-            for (int i = 0; i < 4; i++)
-            {
-                for (int j = 0; j < 4; j++)
-                {
-                    matrix[i][j] = 0;
-                }
-            }
-            matrix[0][0] = 1;
-            matrix[1][1] = 1;
-            matrix[2][2] = 1;
-            matrix[3][3] = 1;
-
-            //Single Vertex   
-            result.x = 0;
-            result.y = 0;
-            result.z = 0;
-            result.w = 0;
-        }
-
-        //Setup the matrix and a single vertex and call the
-        //transformation required
-        Matrix(const Vertex & vertIn, const Attributes & uniforms)
-        {
-            //Matrix of 4x4
-            for (int i = 0; i < 4; i++)
-            {
-                for (int j = 0; j < 4; j++)
-                {
-                    matrix[i][j] = 0;
-                }
-            }
-            matrix[0][0] = 1;
-            matrix[1][1] = 1;
-            matrix[2][2] = 1;
-            matrix[3][3] = 1;
-
-            //Single vertex
-            result.x = 0;
-            result.y = 0;
-            result.z = 0;
-            result.w = 0;
-
-            //Based on the first number in the uniforms
-            //the wanted transformation is performed
-            switch((int)uniforms.other[0])
-            {
-                case 0:
-                translate(vertIn, uniforms);
-                break;
-                case 1:
-                scale(vertIn, uniforms);
-                break;
-                case 2:
-                rotate(vertIn, uniforms);
-                break;
-                default:
-                STR(vertIn, uniforms);
-            }
-        }
-
-        //Translate the vertex by the uniform using matrix multiplication
-        void translate(const Vertex & vertIn, const Attributes & uniforms)
-        {
-            double sum[4] = {0, 0, 0, 0};
-            double vert[4] = {vertIn.x, vertIn.y, vertIn.z, vertIn.w};
-
-            //Setup the matrix
-            matrix[0][2] = uniforms.other[1];
-            matrix[1][2] = uniforms.other[2];
-
-            //Multiply and add the result
-            for(int i = 0; i < 4; i++)
-            {
-                for (int j = 0; j < 4; j++)
-                {
-                    sum[i] += matrix[i][j] * vert[j];
-                }
-            }
-
-            //Save the result
-            result.x = sum[0];
-            result.y = sum[1];
-            result.z = sum[2];
-            result.w = sum[3];
-        }
-
-        //Rotate the vertex by the uniform using matrix multiplication
-        void rotate(const Vertex & vertIn, const Attributes & uniforms)
-        {
-            //Convert degrees to radians
-            double angle = (uniforms.other[1] * M_PI) / 180;
-            double sum[4] = {0, 0, 0, 0};
-            double vert[4] = {vertIn.x, vertIn.y, vertIn.z, vertIn.w};
-
-            //Setup the matrix
-            matrix[0][0] = cos(angle);
-            matrix[0][1] = -sin(angle);
-            matrix[1][0] = sin(angle);
-            matrix[1][1] = cos(angle);
-
-            //Multiply and add the result
-            for(int i = 0; i < 4; i++)
-            {
-                for (int j = 0; j < 4; j++)
-                {
-                    sum[i] += matrix[i][j] * vert[j];
-                }
-            }
-
-            //Save the result
-            result.x = sum[0];
-            result.y = sum[1];
-            result.z = sum[2];
-            result.w = sum[3];
-        }
-
-        //Scale the vertex by the uniform using matrix multiplication
-        void scale(const Vertex & vertIn, const Attributes & uniforms)
-        {
-            double sum[4] = {0, 0, 0, 0};
-            double vert[4] = {vertIn.x, vertIn.y, vertIn.z, vertIn.w};
-
-            //Setup the matrix
-            matrix[0][0] = uniforms.other[1];
-            matrix[1][1] = uniforms.other[1];
-
-            //Multiply and add the result
-            for(int i = 0; i < 4; i++)
-            {
-                for (int j = 0; j < 4; j++)
-                {
-                    sum[i] += matrix[i][j] * vert[j];
-                }
-            }
-
-            //Save the result
-            result.x = sum[0];
-            result.y = sum[1];
-            result.z = sum[2];
-            result.w = sum[3];
-        }
-
-        void STR(const Vertex & vertIn, const Attributes & uniforms)
-        {
-            //Convert degrees to radians
-            double angle = (uniforms.other[4] * M_PI) / 180;
-
-            //Holds the translation results
-            double transSum[4] = {0, 0, 0, 0};
-
-            //Holds the rotation results
-            double rotateSum[4] = {0, 0, 0, 0};
-
-            //Holds the scaled results
-            double scaledSum[4] = {0, 0, 0, 0};
-
-            //Converts the vertex into an array
-            double vert[4] = {vertIn.x, vertIn.y, vertIn.z, vertIn.w};
-
-            //Setup the matrix
-            matrix[0][0] = uniforms.other[1];
-            matrix[1][1] = uniforms.other[1];
-
-            //Multiply and add the result
-            for(int i = 0; i < 4; i++)
-            {
-                for (int j = 0; j < 4; j++)
-                {
-                    scaledSum[i] += matrix[i][j] * vert[j];
-                }
-            }
-            
-            //Setup the matrix
-            resetMatrix();
-            matrix[0][2] = uniforms.other[2];
-            matrix[1][2] = uniforms.other[3];
-
-            //Multiply and add the result
-            for(int i = 0; i < 4; i++)
-            {
-                for (int j = 0; j < 4; j++)
-                {
-                    transSum[i] += matrix[i][j] * scaledSum[j];
-                }
-            }
-
-            //Setup the matrix
-            resetMatrix();
-            matrix[0][0] = cos(angle);
-            matrix[0][1] = -sin(angle);
-            matrix[1][0] = sin(angle);
-            matrix[1][1] = cos(angle);
-
-            //Multiply and add the result
-            for(int i = 0; i < 4; i++)
-            {
-                for (int j = 0; j < 4; j++)
-                {
-                    rotateSum[i] += matrix[i][j] * transSum[j];
-                }
-            }
-
-            //Save the result
-            result.x = rotateSum[0];
-            result.y = rotateSum[1];
-            result.z = rotateSum[2];
-            result.w = rotateSum[3];
-        }
-
-        Vertex getResult()
-        {
-            return result;
-        }
-
-        void resetMatrix()
-        {
-            //Matrix of 4x4
-            for (int i = 0; i < 4; i++)
-            {
-                for (int j = 0; j < 4; j++)
-                {
-                    matrix[i][j] = 0;
-                }
-            }
-            matrix[0][0] = 1;
-            matrix[1][1] = 1;
-            matrix[2][2] = 1;
-            matrix[3][3] = 1;
-        }
-
-    private:
-        double matrix[4][4];
-        Vertex result;
-};
-
-/******************************************************
- * Fragment Shader List
- * ****************************************************/
 // Example of a fragment shader
 void DefaultFragShader(PIXEL & fragment, const Attributes & vertAttr, const Attributes & uniforms)
 {
     // Output our shader color value, in this case red
     fragment = 0xffff0000;
-}
-
-// This Shader takes three colors and assigns them to each corner of a triangle
-// It then uses linear interpolation to fill the triangle
-void gradiantColorShader(PIXEL & fragment, const Attributes & vertAttr, const Attributes & uniforms)
-{
-    PIXEL color = 0xff000000;
-    color += (unsigned int)(vertAttr.r * 0xff) << 16;
-    color += (unsigned int)(vertAttr.g * 0xff) << 8;
-    color += (unsigned int)(vertAttr.b * 0xff) << 0;
-
-    fragment = color;
-}
-
-//This shader draws a trianlge with a given image
-void imageFragShader(PIXEL & fragment, const Attributes & vertAttr, const Attributes & uniforms)
-{
-    BufferImage* bf = (BufferImage*)uniforms.ptrImage;
-    int x = vertAttr.u * (bf->width()-1);
-    int y = vertAttr.v * (bf->height()-1);
-
-    fragment = (*bf)[y][x];
-}
-
-//This shader draws a picture in green
-void limeFragShader(PIXEL & fragment, const Attributes & vertAttr, const Attributes & uniforms)
-{
-    BufferImage* bf = (BufferImage*)uniforms.ptrImage;
-    int x = vertAttr.u * (bf->width()-1);
-    int y = vertAttr.v * (bf->height()-1);
-
-    PIXEL color = 0xff000000;
-    color += (unsigned int)(x * 0xff) << 8;
-    color += (unsigned int)(y * 0xff) << 8;
-
-    fragment = color;
 }
 
 /*******************************************************
@@ -600,14 +457,6 @@ void DefaultVertShader(Vertex & vertOut, Attributes & attrOut, const Vertex & ve
 {
     // Nothing happens with this vertex, attribute
     vertOut = vertIn;
-    attrOut = vertAttr;
-}
-
-// Translation Shader
-void transVertShader(Vertex & vertOut, Attributes & attrOut, const Vertex & vertIn, const Attributes & vertAttr, const Attributes & uniforms)
-{
-    Matrix matrix(vertIn, uniforms);
-    vertOut = matrix.getResult();
     attrOut = vertAttr;
 }
 
@@ -656,5 +505,16 @@ void DrawPrimitive(PRIMITIVES prim,
                    FragmentShader* const frag = NULL,
                    VertexShader* const vert = NULL,
                    Buffer2D<double>* zBuf = NULL);             
+
+/****************************************
+ * DETERMINANT
+ * Find the determinant of a matrix with
+ * components A, B, C, D from 2 vectors.
+ ***************************************/
+inline double determinant(const double & A, const double & B, const double & C, const double & D)
+{
+  return (A*D - B*C);
+}
+
        
 #endif
