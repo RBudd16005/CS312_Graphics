@@ -80,7 +80,57 @@ void DrawLine(Buffer2D<PIXEL> & target, Vertex* const triangle, Attributes* cons
  ************************************************************/
 void DrawTriangle(Buffer2D<PIXEL> & target, Vertex* const triangle, Attributes* const attrs, Attributes* const uniforms, FragmentShader* const frag)
 {
-    // Your code goes here
+    //First we will find all the minimum and maximum X and Y points
+    //to create the bounding box
+    double maxX = MAX3(triangle[0].x, triangle[1].x, triangle[2].x);
+    double maxY = MAX3(triangle[0].y, triangle[1].y, triangle[2].y);
+    double minX = MIN3(triangle[0].x, triangle[1].x, triangle[2].x);
+    double minY = MIN3(triangle[0].y, triangle[1].y, triangle[2].y);
+
+    //A little setup for future calculations and ensure that we are
+    //doing things in counter-clockwise order
+    double firstVec[] = {triangle[1].x - triangle[0].x, triangle[1].y - triangle[0].y};
+    double secondVec[] = {triangle[2].x - triangle[1].x, triangle[2].y - triangle[1].y};
+    double thirdVec[] = {triangle[0].x - triangle[2].x, triangle[0].y - triangle[2].y};
+
+    //Find the area of the triangle for later calculations using negatives as
+    //appropriate so as to not get a negative value here
+    double area = calcArea(firstVec[0], -thirdVec[0], firstVec[1], -thirdVec[1]);
+
+    //Loop through the box around the triangle
+    for (int x = minX; x <= maxX; x++)
+    {
+        for (int y = minY; y <= maxY; y++)
+        {
+            //We now find the area of the triangles using the current point
+            //as a new vector to see if the point is in the triangle
+            double firstDet = calcArea(firstVec[0], x - triangle[0].x, firstVec[1], y - triangle[0].y);
+            double secondDet = calcArea(secondVec[0], x - triangle[1].x, secondVec[1], y - triangle[1].y);
+            double thirdDet = calcArea(thirdVec[0], x - triangle[2].x, thirdVec[1], y - triangle[2].y);
+
+            //If the point is found inside the triangle, draw it
+            if ((firstDet >= 0) && (secondDet >= 0) && (thirdDet >= 0))
+            {
+                Attributes interpAttrs;
+
+                //affine calculation
+                //double affineX = affineCalc(x, minX, maxX);
+                //double affineY = affineCalc(
+
+                //Interpolation
+                interpAttrs.u = interpolate(area, firstDet, secondDet, thirdDet, attrs[0].u, attrs[1].u, attrs[2].u);
+                interpAttrs.v = interpolate(area, firstDet, secondDet, thirdDet, attrs[0].v, attrs[1].v, attrs[2].v);
+                double w = interpolate(area, firstDet, secondDet, thirdDet, triangle[0].w, triangle[1].w, triangle[2].w);
+
+                //multiply by the corrected Z or 1/Z
+                interpAttrs.u *= 1/w;
+                interpAttrs.v *= 1/w;
+
+                //Call shader callback
+                frag->FragShader(target[y][x], interpAttrs, *uniforms);
+            }
+        }
+    }
 }
 
 /**************************************************************
@@ -173,7 +223,7 @@ int main()
     FRAME_BUF = SDL_CreateRGBSurface(0, S_WIDTH, S_HEIGHT, 32, 0x000000ff, 0x0000ff00, 0x00ff0000, 0xff000000);
     FRAME_BUF = SDL_ConvertSurface(SDL_GetWindowSurface(WIN), SDL_GetWindowSurface(WIN)->format, 0);
     GPU_OUTPUT = SDL_CreateTextureFromSurface(REN, FRAME_BUF);
-    BufferImage frame(FRAME_BUF);
+    BufferImage frame(FRAME_BUF); //FRAME_BUF
 
     // Draw loop 
     bool running = true;
@@ -185,8 +235,8 @@ int main()
         // Refresh Screen
         clearScreen(frame);
 
-        // Your code goes here
-        TestDrawPixel(frame);
+        // Test Draw Functions
+        TestDrawPerspectiveCorrect(frame);
 
         // Push to the GPU
         SendFrame(GPU_OUTPUT, REN, FRAME_BUF);
